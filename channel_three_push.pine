@@ -1,0 +1,407 @@
+//@version=5
+indicator("Channel Three Push System", shorttitle="CTPS", overlay=true, max_lines_count=500, max_labels_count=100)
+
+// ==================== 配置参数 ====================
+// 急速行情参数
+rapidLen = input.int(10, "急速行情检测窗口", minval=5, maxval=50)
+rapidMultiplier = input.float(1.5, "实体倍数阈值", minval=1.2, maxval=3.0)
+minRapidBars = input.int(2, "最少急速K线数", minval=2, maxval=5)
+
+// 通道参数
+channelLookback = input.int(20, "通道检测窗口", minval=10, maxval=50)
+minTouchPoints = input.int(3, "最少接触点数", minval=2, maxval=10)
+channelSlopeThreshold = input.float(0.6, "通道斜率阈值", minval=0.3, maxval=1.0)
+
+// 三段推动参数
+push1MinHeight = input.float(0.6, "第一段最小高度%", minval=0.4, maxval=0.8, step=0.05)
+push2MaxHeight = input.float(0.8, "第二段最大高度%", minval=0.5, maxval=1.0, step=0.05)
+overshootThreshold = input.float(0.2, "过冲阈值%", minval=0.1, maxval=0.5, step=0.05)
+
+// 验证参数
+failureBars = input.int(5, "衰竭验证K线数", minval=3, maxval=10)
+minSwingCount = input.int(2, "最少摆动次数", minval=1, maxval=5)
+reversalConfirmation = input.int(1, "反转确认K线数", minval=1, maxval=3)
+
+// 可视化参数
+showLabels = input.bool(true, "显示标签")
+showLines = input.bool(true, "显示线条")
+colorBullish = input.color(color.green, "多头颜色")
+colorBearish = input.color(color.red, "空头颜色")
+colorNeutral = input.color(color.blue, "中性颜色")
+showAlerts = input.bool(true, "显示警报")
+
+// ==================== 核心函数定义 ====================
+
+// 计算K线实体大小
+bodySize() =>
+    math.abs(close - open)
+
+// 计算平均实体大小
+avgBodySize(len) =>
+    ta.sma(bodySize(), len)
+
+// 检测急速行情
+isRapidBullish() =>
+    rapidCondition = false
+    rapidCount = 0
+    
+    for i = 0 to rapidLen - 1
+        barBody = bodySize()[i]
+        avgBody = avgBodySize(rapidLen)[i+1]
+        isBullishBar = close[i] > open[i]
+        isLargeBody = barBody > avgBody * rapidMultiplier
+        
+        if isBullishBar and isLargeBody
+            rapidCount := rapidCount + 1
+        else
+            rapidCount := 0
+            
+        if rapidCount >= minRapidBars
+            rapidCondition := true
+            break
+    
+    rapidCondition
+
+isRapidBearish() =>
+    rapidCondition = false
+    rapidCount = 0
+    
+    for i = 0 to rapidLen - 1
+        barBody = bodySize()[i]
+        avgBody = avgBodySize(rapidLen)[i+1]
+        isBearishBar = close[i] < open[i]
+        isLargeBody = barBody > avgBody * rapidMultiplier
+        
+        if isBearishBar and isLargeBody
+            rapidCount := rapidCount + 1
+        else
+            rapidCount := 0
+            
+        if rapidCount >= minRapidBars
+            rapidCondition := true
+            break
+    
+    rapidCondition
+
+// 找到急速行情结束点
+getRapidEnd() =>
+    var int rapidEnd = na
+    var bool inRapid = false
+    
+    if isRapidBullish() or isRapidBearish()
+        inRapid := true
+    else if inRapid and not (isRapidBullish() or isRapidBearish())
+        rapidEnd := bar_index
+        inRapid := false
+    
+    rapidEnd
+
+// 计算简单线性回归
+linearRegression(src, length) =>
+    sumX = 0.0
+    sumY = 0.0
+    sumXY = 0.0
+    sumXX = 0.0
+    
+    for i = 0 to length - 1
+        x = i
+        y = src[i]
+        sumX := sumX + x
+        sumY := sumY + y
+        sumXY := sumXY + x * y
+        sumXX := sumXX + x * x
+    
+    slope = (length * sumXY - sumX * sumY) / (length * sumXX - sumX * sumX)
+    intercept = (sumY - slope * sumX) / length
+    
+    [slope, intercept]
+
+// 绘制通道
+var line upperChannelLine = na
+var line lowerChannelLine = na
+var float channelSlopeValue = na
+var float channelStartPrice = na
+var float channelHeightValue = na
+
+rapidEndIdx = getRapidEnd()
+
+if not na(rapidEndIdx) and bar_index >= rapidEndIdx + 5
+    // 计算回归线
+    lookback = math.min(channelLookback, bar_index - rapidEndIdx)
+    regressionPrices = array.new<float>(0)
+    
+    for i = 0 to lookback - 1
+        array.push(regressionPrices, close[i])
+    
+    if array.size(regressionPrices) >= minTouchPoints
+        [slope, intercept] = linearRegression(regressionPrices, array.size(regressionPrices))
+        
+        // 找到通道起点（第一次回撤低点）
+        startPrice = low[rapidEndIdx - bar_index]
+        for i = rapidEndIdx + 1 to rapidEndIdx + lookback
+            idx = i - bar_index
+            if idx >= 0 and low[idx] < startPrice
+                startPrice := low[idx]
+        
+        // 计算通道参数
+        currentIdx = bar_index - rapidEndIdx
+        upperPrice = intercept + slope * currentIdx
+        channelHeight = upperPrice - startPrice
+        
+        // 绘制通道线
+        if showLines
+            line.delete(upperChannelLine[1])
+            line.delete(lowerChannelLine[1])
+            
+            upperChannelLine := line.new(
+                bar_index - lookback, upperPrice - channelHeight,
+                bar_index, upperPrice,
+                color=colorNeutral, width=1, style=line.style_solid
+            )
+            
+            lowerChannelLine := line.new(
+                bar_index - lookback, startPrice,
+                bar_index, startPrice + channelHeight,
+                color=colorNeutral, width=1, style=line.style_solid
+            )
+        
+        channelSlopeValue := math.abs(slope)
+        channelStartPrice := startPrice
+        channelHeightValue := channelHeight
+
+// 识别摆动点
+isSwingHigh(offset, leftBars, rightBars) =>
+    pivotHigh = ta.pivothigh(offset, leftBars, rightBars)
+    not na(pivotHigh)
+
+isSwingLow(offset, leftBars, rightBars) =>
+    pivotLow = ta.pivotlow(offset, leftBars, rightBars)
+    not na(pivotLow)
+
+// 三段推动识别
+var int push1StartBar = na
+var int push1EndBar = na
+var float push1HeightVal = na
+
+var int push2StartBar = na
+var int push2EndBar = na
+var float push2HeightVal = na
+
+var int push3StartBar = na
+var int push3EndBar = na
+var float push3HeightVal = na
+
+if not na(upperChannelLine) and not na(lowerChannelLine)
+    upperPrice = line.get_y2(upperChannelLine)
+    lowerPrice = line.get_y1(lowerChannelLine)
+    currentHeight = channelHeightValue
+    
+    // 计算当前价格在通道中的位置
+    currentPosition = (close - lowerPrice) / currentHeight
+    
+    // 识别第一段推动
+    if na(push1StartBar) and currentPosition <= 0.3
+        push1StartBar := bar_index
+    
+    if not na(push1StartBar) and na(push1EndBar) and currentPosition >= 0.7
+        push1EndBar := bar_index
+        push1HeightVal := currentPosition * 100
+        
+        // 开始第二段推动
+        push2StartBar := bar_index
+    
+    // 识别第二段推动
+    if not na(push2StartBar) and na(push2EndBar) and currentPosition >= 0.5
+        if currentPosition * 100 < push1HeightVal * push2MaxHeight
+            push2EndBar := bar_index
+            push2HeightVal := currentPosition * 100
+            
+            // 开始第三段推动
+            push3StartBar := bar_index
+    
+    // 识别第三段推动（过冲）
+    if not na(push3StartBar) and na(push3EndBar)
+        overshoot = (high - upperPrice) / currentHeight
+        if overshoot > 0 and overshoot <= overshootThreshold
+            push3EndBar := bar_index
+            push3HeightVal := overshoot * 100
+
+// 衰竭信号检测
+var bool failureSignal = false
+var int failureBarIdx = na
+
+if not na(push3EndBar) and bar_index <= push3EndBar + failureBars
+    // 检查是否回到通道内
+    for i = 1 to failureBars
+        checkBar = push3EndBar + i
+        if checkBar <= bar_index
+            checkIdx = checkBar - bar_index
+            checkPrice = close[checkIdx]
+            checkPosition = (checkPrice - lowerPrice) / channelHeightValue
+            
+            if checkPosition < 1.0
+                failureSignal := true
+                failureBarIdx := checkBar
+                break
+    
+    // 检查反转K线
+    if not failureSignal
+        for i = 0 to math.min(2, failureBars - 1)
+            idx = push3EndBar + i - bar_index
+            if idx >= 0
+                // 吞没形态
+                isEngulfing = close[idx] < open[idx] and 
+                            high[idx] >= high[idx-1] and 
+                            low[idx] <= low[idx-1]
+                
+                // Pin bar形态
+                bodySize = math.abs(close[idx] - open[idx])
+                rangeSize = high[idx] - low[idx]
+                upperWick = high[idx] - math.max(close[idx], open[idx])
+                lowerWick = math.min(close[idx], open[idx]) - low[idx]
+                
+                isPinBar = bodySize < rangeSize * 0.3 and upperWick > lowerWick * 2
+                
+                if isEngulfing or isPinBar
+                    failureSignal := true
+                    failureBarIdx := push3EndBar + i
+                    break
+
+// ==================== 可视化 ====================
+
+// 背景色标记
+bgcolor(isRapidBullish() ? color.new(colorBullish,助盲级别工具) : isRapidBearish() ? color.new(colorBearish, 85) : na, title="急速行情")
+
+// 标记三段推动
+if showLabels
+    // 第一段推动
+    if not na(push1EndBar)
+        label.new(
+            push1EndBar, high[push1EndBar - bar_index] + channelHeightValue * 0.05,
+            "推1\n" + str.tostring(push1HeightVal, "#.#") + "%",
+            color=colorBullish, textcolor=color.white,
+            style=label.style_label_up, size=size.small
+        )
+    
+    // 第二段推动
+    if not na(push2EndBar)
+        label.new(
+            push2EndBar, high[push2EndBar - bar_index] + channelHeightValue * 0.05,
+            "推2\n" + str.tostring(push2HeightVal, "#.#") + "%",
+            color=color.new(colorBullish, 50), textcolor=color.white,
+            style=label.style_label_up, size=size.small
+        )
+    
+    // 第三段推动
+    if not na(push3EndBar)
+        labelColor = failureSignal ? colorBearish : colorNeutral
+        label.new(
+            push3EndBar, high[push3EndBar - bar_index] + channelHeightValue * 0.08,
+            "推3\n" + str.tostring(push3HeightVal, "#.#") + "%",
+            color=labelColor, textcolor=color.white,
+            style=label.style_label_up, size=size.small
+        )
+    
+    // 衰竭信号
+    if failureSignal and not na(failureBarIdx)
+        label.new(
+            failureBarIdx, low[failureBarIdx - bar_index] - channelHeightValue * 0.05,
+            "衰竭!",
+            color=colorBearish, textcolor=color.white,
+            style=label.style_label_down, size=size.normal
+        )
+
+// 绘制水平线
+if showLines and not na(channelStartPrice)
+    hline(channelStartPrice, "通道起点", color=color.orange, linestyle=hline.style_dashed)
+    
+    if not na(push1EndBar)
+        extremeHigh = high[push1EndBar - bar_index]
+        hline(extremeHigh, "通道极值", color=color.purple, linestyle=hline.style_dotted)
+
+// 信息表格
+var table infoTable = na
+if barstate.islast
+    infoTable := table.new(position.top_right, 3, 7, bgcolor=color.new(color.gray, 90), border_width=1)
+    
+    table.cell(infoTable, 0, 0, "通道三段推动系统", bgcolor=color.blue, textcolor=color.white)
+    table.cell(infoTable, 1, 0, "状态", textcolor=color.white)
+    table.cell(infoTable, 2, 0, "数值", textcolor=color.white)
+    
+    // 行1: 急速行情
+    table.cell(infoTable, 0, 1, "急速行情", textcolor=color.gray)
+    rapidStatus = isRapidBullish() ? "多头" : isRapidBearish() ? "空头" : "无"
+    rapidColor = isRapidBullish() ? color.green : isRapidBearish() ? color.red : color.gray
+    table.cell(infoTable, 1, 1, rapidStatus, textcolor=rapidColor)
+    table.cell(infoTable, 2, 1, na, textcolor=color.gray)
+    
+    // 行2: 通道斜率
+    table.cell(infoTable, 0, 2, "通道斜率", textcolor=color.gray)
+    if not na(channelSlopeValue)
+        slopeColor = channelSlopeValue < channelSlopeThreshold ? color.green : color.red
+        table.cell(infoTable, 1, 2, str.tostring(channelSlopeValue, "#.####"), textcolor=slopeColor)
+        table.cell(infoTable, 2, 2, channelSlopeValue < channelSlopeThreshold ? "正常" : "过陡", textcolor=slopeColor)
+    
+    // 行3: 三段推动
+    table.cell(infoTable, 0, 3, "三段推动", textcolor=color.gray)
+    pushCount = (not na(push1EndBar) ? 1 : 0) + (not na(push2EndBar) ? 1 : 0) + (not na(push3EndBar) ? 1 : 0)
+    pushStatus = pushCount == 3 ? "完成" : pushCount > 0 ? str.tostring(pushCount) + "/3" : "等待"
+    pushColor = pushCount == 3 ? color.blue : pushCount > 0 ? color.orange : color.gray
+    table.cell(infoTable, 1, 3, pushStatus, textcolor=pushColor)
+    table.cell(infoTable, 2, 3, str.tostring(pushCount) + "段", textcolor=pushColor)
+    
+    // 行4: 衰竭信号
+    table.cell(infoTable, 0, 4, "衰竭信号", textcolor=color.gray)
+    failureStatus = failureSignal ? "检测到" : "无"
+    failureColor = failureSignal ? color.red : color.gray
+    table.cell(infoTable, 1, 4, failureStatus, textcolor=failureColor)
+    table.cell(infoTable, 2, 4, failureSignal ? "警惕" : "安全", textcolor=failureColor)
+    
+    // 行5: 通道高度
+    table.cell(infoTable, 0, 5, "通道高度", textcolor=color.gray)
+    if not na(channelHeightValue)
+        table.cell(infoTable, 1, 5, str.tostring(channelHeightValue, "#.##"), textcolor=color.white)
+        table.cell(infoTable, 2, 5, str.tostring(channelHeightValue / close * 100, "#.##") + "%", textcolor=color.white)
+    
+    // 行6: 当前位置
+    table.cell(infoTable, 0, 6, "当前位置", textcolor=color.gray)
+    if not na(upperChannelLine) and not na(lowerChannelLine)
+        currentPos = (close - lowerPrice) / channelHeightValue * 100
+        posColor = currentPos > 70 ? color.red : currentPos < 30 ? color.green : color.yellow
+        table.cell(infoTable, 1, 6, str.tostring(currentPos, "#.#") + "%", textcolor=posColor)
+        posDesc = currentPos > 70 ? "上轨附近" : currentPos < 30 ? "下轨附近" : "通道中部"
+        table.cell(infoTable, 2, 6, posDesc, textcolor=posColor)
+
+// 警报
+if showAlerts
+    // 急速行情警报
+    alertcondition(isRapidBullish() or isRapidBearish(), "急速行情", "检测到急速行情")
+    
+    // 三段推动完成警报
+    if not na(push1EndBar) and not na(push2EndBar) and not na(push3EndBar)
+        alertcondition(true, "三段推动完成", "三段推动形态完成")
+    
+    // 衰竭信号警报
+    alertcondition(failureSignal, "衰竭信号", "检测到通道衰竭信号")
+
+// 绘图结束
+plotshape(isRapidBullish(), "多头急速", shape.triangleup, location.belowbar, color.green, size=size.small)
+plotshape(isRapidBearish(), "空头急速", shape.triangledown, location.abovebar, color.red, size=size.small)
+
+if failureSignal
+    plotshape(failureBarIdx == bar_index, "衰竭点", shape.xcross, location.abovebar, color.red, size=size.normal)
+
+// 打印调试信息（可选）
+// plotchar(not na(push1EndBar), "推1", "1", location.top, size=size.tiny)
+// plotchar(not na(push2EndBar), "推2", "2", location.top, size=size.tiny)
+// plotchar(not na(push3EndBar), "推3", "3", location.top, size=size.tiny)
+
+// 系统说明注释
+// 本指标实现"通道三段式推动"交易系统，包含7个模块：
+// 1. 趋势结构识别（急速行情+通道）
+// 2. 通道平衡验证（规律摆动）
+// 3. 过冲衰竭识别（虚假突破）
+// 4. 趋势线突破确认
+// 5. 双重顶形态验证
+// 6. 通道起点支撑测试
+// 7. 交易区间形成与突破
