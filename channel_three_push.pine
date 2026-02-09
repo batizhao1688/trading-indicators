@@ -24,246 +24,247 @@ colorBullish = input.color(color.green, "多头颜色")
 colorBearish = input.color(color.red, "空头颜色")
 colorNeutral = input.color(color.blue, "中性颜色")
 showAlerts = input.bool(true, "显示警报")
+showTable = input.bool(true, "显示信息表格")
 
-// ========== 核心函数 ==========
-bodySize() => math.abs(close - open)
-avgBodySize(len) => ta.sma(bodySize(), len)
+// ========== 核心计算函数 ==========
+bodySize = math.abs(close - open)
+avgBodySize = ta.sma(bodySize, rapidLen)
 
-isRapidBullish() =>
-    rapidCondition = false
-    rapidCount = 0
-    for i = 0 to rapidLen - 1
-        barBody = bodySize()[i]
-        avgBody = avgBodySize(rapidLen)[i+1]
-        isBullishBar = close[i] > open[i]
-        isLargeBody = barBody > avgBody * rapidMultiplier
-        if isBullishBar and isLargeBody
-            rapidCount := rapidCount + 1
-        else
-            rapidCount := 0
-        if rapidCount >= minRapidBars
-            rapidCondition := true
-            break
-    rapidCondition
+// 急速行情检测
+isRapidBullish = false
+rapidBullishCount = 0
+for i = 0 to rapidLen - 1
+    barBody = bodySize[i]
+    avgBody = avgBodySize[i+1]
+    if close[i] > open[i] and barBody > avgBody * rapidMultiplier
+        rapidBullishCount := rapidBullishCount + 1
+    else
+        rapidBullishCount := 0
+    if rapidBullishCount >= minRapidBars
+        isRapidBullish := true
+        break
 
-isRapidBearish() =>
-    rapidCondition = false
-    rapidCount = 0
-    for i = 0 to rapidLen - 1
-        barBody = bodySize()[i]
-        avgBody = avgBodySize(rapidLen)[i+1]
-        isBearishBar = close[i] < open[i]
-        isLargeBody = barBody > avgBody * rapidMultiplier
-        if isBearishBar and isLargeBody
-            rapidCount := rapidCount + 1
-        else
-            rapidCount := 0
-        if rapidCount >= minRapidBars
-            rapidCondition := true
-            break
-    rapidCondition
+isRapidBearish = false
+rapidBearishCount = 0
+for i = 0 to rapidLen - 1
+    barBody = bodySize[i]
+    avgBody = avgBodySize[i+1]
+    if close[i] < open[i] and barBody > avgBody * rapidMultiplier
+        rapidBearishCount := rapidBearishCount + 1
+    else
+        rapidBearishCount := 0
+    if rapidBearishCount >= minRapidBars
+        isRapidBearish := true
+        break
 
-getRapidEnd() =>
-    var int rapidEnd = na
-    var bool inRapid = false
-    if isRapidBullish() or isRapidBearish()
-        inRapid := true
-    else if inRapid and not (isRapidBullish() or isRapidBearish())
-        rapidEnd := bar_index
-        inRapid := false
-    rapidEnd
+// 急速行情结束点
+var int rapidEndBar = na
+if (isRapidBullish or isRapidBearish) and na(rapidEndBar)
+    rapidEndBar := bar_index
+else if not (isRapidBullish or isRapidBearish) and not na(rapidEndBar)
+    rapidEndBar := na
 
-linearRegression(src, length) =>
+// 通道计算
+var line upperLine = na
+var line lowerLine = na
+var float channelSlopeVal = na
+var float channelStartVal = na
+var float channelHeightVal = na
+
+if not na(rapidEndBar) and bar_index >= rapidEndBar + 5
+    lookback = math.min(channelLookback, bar_index - rapidEndBar)
     sumX = 0.0
     sumY = 0.0
     sumXY = 0.0
     sumXX = 0.0
-    for i = 0 to length - 1
+    for i = 0 to lookback - 1
         x = i
-        y = src[i]
+        y = close[i]
         sumX := sumX + x
         sumY := sumY + y
         sumXY := sumXY + x * y
         sumXX := sumXX + x * x
-    slope = (length * sumXY - sumX * sumY) / (length * sumXX - sumX * sumX)
-    intercept = (sumY - slope * sumX) / length
-    [slope, intercept]
+    
+    n = lookback
+    slope = (n * sumXY - sumX * sumY) / (n * sumXX - sumX * sumX)
+    intercept = (sumY - slope * sumX) / n
+    
+    // 找到通道起点
+    startPrice = low[rapidEndBar - bar_index]
+    for i = rapidEndBar + 1 to rapidEndBar + lookback
+        idx = i - bar_index
+        if idx >= 0 and low[idx] < startPrice
+            startPrice := low[idx]
+    
+    currentIdx = bar_index - rapidEndBar
+    upperPrice = intercept + slope * currentIdx
+    channelHeight = upperPrice - startPrice
+    
+    if showLines
+        line.delete(upperLine[1])
+        line.delete(lowerLine[1])
+        upperLine := line.new(bar_index - lookback, upperPrice - channelHeight, bar_index, upperPrice, color=colorNeutral, width=1)
+        lowerLine := line.new(bar_index - lookback, startPrice, bar_index, startPrice + channelHeight, color=colorNeutral, width=1)
+    
+    channelSlopeVal := math.abs(slope)
+    channelStartVal := startPrice
+    channelHeightVal := channelHeight
 
-var line upperChannelLine = na
-var line lowerChannelLine = na
-var float channelSlopeValue = na
-var float channelStartPrice = na
-var float channelHeightValue = na
+// 三段推动识别
+var int push1End = na
+var float push1Height = na
+var int push2End = na
+var float push2Height = na
+var int push3End = na
+var float push3Height = na
 
-rapidEndIdx = getRapidEnd()
-if not na(rapidEndIdx) and bar_index >= rapidEndIdx + 5
-    lookback = math.min(channelLookback, bar_index - rapidEndIdx)
-    regressionPrices = array.new<float>(0)
-    for i = 0 to lookback - 1
-        array.push(regressionPrices, close[i])
-    if array.size(regressionPrices) >= minTouchPoints
-        [slope, intercept] = linearRegression(regressionPrices, array.size(regressionPrices))
-        startPrice = low[rapidEndIdx - bar_index]
-        for i = rapidEndIdx + 1 to rapidEndIdx + lookback
-            idx = i - bar_index
-            if idx >= 0 and low[idx] < startPrice
-                startPrice := low[idx]
-        currentIdx = bar_index - rapidEndIdx
-        upperPrice = intercept + slope * currentIdx
-        channelHeight = upperPrice - startPrice
-        if showLines
-            line.delete(upperChannelLine[1])
-            line.delete(lowerChannelLine[1])
-            upperChannelLine := line.new(bar_index - lookback, upperPrice - channelHeight, bar_index, upperPrice, color=colorNeutral, width=1, style=line.style_solid)
-            lowerChannelLine := line.new(bar_index - lookback, startPrice, bar_index, startPrice + channelHeight, color=colorNeutral, width=1, style=line.style_solid)
-        channelSlopeValue := math.abs(slope)
-        channelStartPrice := startPrice
-        channelHeightValue := channelHeight
-
-isSwingHigh(offset, leftBars, rightBars) =>
-    pivotHigh = ta.pivothigh(offset, leftBars, rightBars)
-    not na(pivotHigh)
-
-isSwingLow(offset, leftBars, rightBars) =>
-    pivotLow = ta.pivotlow(offset, leftBars, rightBars)
-    not na(pivotLow)
-
-var int push1StartBar = na
-var int push1EndBar = na
-var float push1HeightVal = na
-var int push2StartBar = na
-var int push2EndBar = na
-var float push2HeightVal = na
-var int push3StartBar = na
-var int push3EndBar = na
-var float push3HeightVal = na
-
-if not na(upperChannelLine) and not na(lowerChannelLine)
-    upperPrice = line.get_y2(upperChannelLine)
-    lowerPrice = line.get_y1(lowerChannelLine)
-    currentHeight = channelHeightValue
-    currentPosition = (close - lowerPrice) / currentHeight
-    if na(push1StartBar) and currentPosition <= 0.3
-        push1StartBar := bar_index
-    if not na(push1StartBar) and na(push1EndBar) and currentPosition >= 0.7
-        push1EndBar := bar_index
-        push1HeightVal := currentPosition * 100
-        push2StartBar := bar_index
-    if not na(push2StartBar) and na(push2EndBar) and currentPosition >= 0.5
-        if currentPosition * 100 < push1HeightVal * push2MaxHeight
-            push2EndBar := bar_index
-            push2HeightVal := currentPosition * 100
-            push3StartBar := bar_index
-    if not na(push3StartBar) and na(push3EndBar)
-        overshoot = (high - upperPrice) / currentHeight
+if not na(upperLine) and not na(lowerLine)
+    upperPrice = line.get_y2(upperLine)
+    lowerPrice = line.get_y1(lowerLine)
+    heightVal = channelHeightVal
+    
+    currentPos = (close - lowerPrice) / heightVal
+    
+    // 第一段推动
+    if na(push1End) and currentPos <= 0.3 and currentPos >= 0.7
+        push1End := bar_index
+        push1Height := currentPos * 100
+    
+    // 第二段推动
+    if not na(push1End) and na(push2End) and currentPos >= 0.5
+        if currentPos * 100 < push1Height * push2MaxHeight
+            push2End := bar_index
+            push2Height := currentPos * 100
+    
+    // 第三段推动
+    if not na(push2End) and na(push3End)
+        overshoot = (high - upperPrice) / heightVal
         if overshoot > 0 and overshoot <= overshootThreshold
-            push3EndBar := bar_index
-            push3HeightVal := overshoot * 100
+            push3End := bar_index
+            push3Height := overshoot * 100
 
-var bool failureSignal = false
-var int failureBarIdx = na
+// 衰竭信号检测
+var bool failureDetected = false
+var int failureBar = na
 
-if not na(push3EndBar) and bar_index <= push3EndBar + failureBars
+if not na(push3End) and bar_index <= push3End + failureBars
     for i = 1 to failureBars
-        checkBar = push3EndBar + i
+        checkBar = push3End + i
         if checkBar <= bar_index
             checkIdx = checkBar - bar_index
             checkPrice = close[checkIdx]
-            checkPosition = (checkPrice - lowerPrice) / channelHeightValue
-            if checkPosition < 1.0
-                failureSignal := true
-                failureBarIdx := checkBar
-                break
-    if not failureSignal
+            if not na(upperLine) and not na(lowerLine)
+                checkPos = (checkPrice - line.get_y1(lowerLine)) / channelHeightVal
+                if checkPos < 1.0
+                    failureDetected := true
+                    failureBar := checkBar
+                    break
+    
+    if not failureDetected
         for i = 0 to math.min(2, failureBars - 1)
-            idx = push3EndBar + i - bar_index
+            idx = push3End + i - bar_index
             if idx >= 0
-                isEngulfing = close[idx] < open[idx] and high[idx] >= high[idx-1] and low[idx] <= low[idx-1]
-                bodySize = math.abs(close[idx] - open[idx])
-                rangeSize = high[idx] - low[idx]
+                engulfBearish = close[idx] < open[idx] and high[idx] >= high[idx-1] and low[idx] <= low[idx-1]
+                body = math.abs(close[idx] - open[idx])
+                range = high[idx] - low[idx]
                 upperWick = high[idx] - math.max(close[idx], open[idx])
                 lowerWick = math.min(close[idx], open[idx]) - low[idx]
-                isPinBar = bodySize < rangeSize * 0.3 and upperWick > lowerWick * 2
-                if isEngulfing or isPinBar
-                    failureSignal := true
-                    failureBarIdx := push3EndBar + i
+                pinBar = body < range * 0.3 and upperWick > lowerWick * 2
+                if engulfBearish or pinBar
+                    failureDetected := true
+                    failureBar := push3End + i
                     break
 
 // ========== 可视化 ==========
-bgcolor(isRapidBullish() ? color.new(colorBullish, 85) : isRapidBearish() ? color.new(colorBearish, 85) : na, title="急速行情")
+// 背景色标记
+bgcolor(isRapidBullish ? color.new(colorBullish, 85) : isRapidBearish ? color.new(colorBearish, 85) : na)
 
+// 标签显示
 if showLabels
-    if not na(push1EndBar)
-        label.new(push1EndBar, high[push1EndBar - bar_index] + channelHeightValue * 0.05, "推1\n" + str.tostring(push1HeightVal, "#.#") + "%", color=colorBullish, textcolor=color.white, style=label.style_label_up, size=size.small)
-    if not na(push2EndBar)
-        label.new(push2EndBar, high[push2EndBar - bar_index] + channelHeightValue * 0.05, "推2\n" + str.tostring(push2HeightVal, "#.#") + "%", color=color.new(colorBullish, 50), textcolor=color.white, style=label.style_label_up, size=size.small)
-    if not na(push3EndBar)
-        labelColor = failureSignal ? colorBearish : colorNeutral
-        label.new(push3EndBar, high[push3EndBar - bar_index] + channelHeightValue * 0.08, "推3\n" + str.tostring(push3HeightVal, "#.#") + "%", color=labelColor, textcolor=color.white, style=label.style_label_up, size=size.small)
-    if failureSignal and not na(failureBarIdx)
-        label.new(failureBarIdx, low[failureBarIdx - bar_index] - channelHeightValue * 0.05, "衰竭!", color=colorBearish, textcolor=color.white, style=label.style_label_down, size=size.normal)
+    if not na(push1End)
+        label.new(push1End, high[push1End - bar_index] + channelHeightVal * 0.05, "推1\n" + str.tostring(push1Height, "#.#") + "%", color=colorBullish, style=label.style_label_up, size=size.small)
+    if not na(push2End)
+        label.new(push2End, high[push2End - bar_index] + channelHeightVal * 0.05, "推2\n" + str.tostring(push2Height, "#.#") + "%", color=color.new(colorBullish, 50), style=label.style_label_up, size=size.small)
+    if not na(push3End)
+        labelColor = failureDetected ? colorBearish : colorNeutral
+        label.new(push3End, high[push3End - bar_index] + channelHeightVal * 0.08, "推3\n" + str.tostring(push3Height, "#.#") + "%", color=labelColor, style=label.style_label_up, size=size.small)
+    if failureDetected and not na(failureBar)
+        label.new(failureBar, low[failureBar - bar_index] - channelHeightVal * 0.05, "衰竭!", color=colorBearish, style=label.style_label_down, size=size.normal)
 
-if showLines and not na(channelStartPrice)
-    hline(channelStartPrice, "通道起点", color=color.orange, linestyle=hline.style_dashed)
-    if not na(push1EndBar)
-        extremeHigh = high[push1EndBar - bar_index]
-        hline(extremeHigh, "通道极值", color=color.purple, linestyle=hline.style_dotted)
+// 水平线（在全局作用域）
+hlinePrice1 = not na(channelStartVal) ? channelStartVal : na
+hlinePrice2 = not na(push1End) ? high[push1End - bar_index] : na
 
-var table infoTable = na
-if barstate.islast
-    infoTable := table.new(position.top_right, 3, 7, bgcolor=color.new(color.gray, 90), border_width=1)
-    table.cell(infoTable, 0, 0, "通道三段推动系统", bgcolor=color.blue, textcolor=color.white)
-    table.cell(infoTable, 1, 0, "状态", textcolor=color.white)
-    table.cell(infoTable, 2, 0, "数值", textcolor=color.white)
+if showLines and not na(hlinePrice1)
+    hline(hlinePrice1, "通道起点", color=color.orange, linestyle=hline.style_dashed)
+if showLines and not na(hlinePrice2)
+    hline(hlinePrice2, "通道极值", color=color.purple, linestyle=hline.style_dotted)
+
+// 信息表格
+if barstate.islast and showTable
+    infoTable = table.new(position.top_right, 3, cell_text_color=color.white)
     
-    rapidStatus = isRapidBullish() ? "多头" : isRapidBearish() ? "空头" : "无"
-    rapidColor = isRapidBullish() ? color.green : isRapidBearish() ? color.red : color.gray
-    table.cell(infoTable, 0, 1, "急速行情", textcolor=color.gray)
-    table.cell(infoTable, 1, 1, rapidStatus, textcolor=rapidColor)
-    table.cell(infoTable, 2, 1, na, textcolor=color.gray)
+    table.cell(infoTable, 0, 0, "通道三段推动系统", bgcolor=color.blue)
+    table.cell(infoTable, 1, 0, "状态")
+    table.cell(infoTable, 2, 0, "数值")
     
-    if not na(channelSlopeValue)
-        slopeColor = channelSlopeValue < channelSlopeThreshold ? color.green : color.red
-        table.cell(infoTable, 0, 2, "通道斜率", textcolor=color.gray)
-        table.cell(infoTable, 1, 2, str.tostring(channelSlopeValue, "#.####"), textcolor=slopeColor)
-        table.cell(infoTable, 2, 2, channelSlopeValue < channelSlopeThreshold ? "正常" : "过陡", textcolor=slopeColor)
+    // 急速行情状态
+    rapidStatus = isRapidBullish ? "多头" : isRapidBearish ? "空头" : "无"
+    rapidColor = isRapidBullish ? color.green : isRapidBearish ? color.red : color.gray
+    table.cell(infoTable, 0, 1, "急速行情", text_color=color.gray)
+    table.cell(infoTable, 1, 1, rapidStatus, bgcolor=rapidColor)
+    table.cell(infoTable, 2, 1, na)
     
-    pushCount = (not na(push1EndBar) ? 1 : 0) + (not na(push2EndBar) ? 1 : 0) + (not na(push3EndBar) ? 1 : 0)
+    // 通道斜率
+    if not na(channelSlopeVal)
+        slopeColor = channelSlopeVal < channelSlopeThreshold ? color.green : color.red
+        table.cell(infoTable, 0, 2, "通道斜率", text_color=color.gray)
+        table.cell(infoTable, 1, 2, str.tostring(channelSlopeVal, "#.####"))
+        table.cell(infoTable, 2, 2, channelSlopeVal < channelSlopeThreshold ? "正常" : "过陡", bgcolor=slopeColor)
+    
+    // 三段推动进度
+    pushCount = (not na(push1End) ? 1 : 0) + (not na(push2End) ? 1 : 0) + (not na(push3End) ? 1 : 0)
     pushStatus = pushCount == 3 ? "完成" : pushCount > 0 ? str.tostring(pushCount) + "/3" : "等待"
     pushColor = pushCount == 3 ? color.blue : pushCount > 0 ? color.orange : color.gray
-    table.cell(infoTable, 0, 3, "三段推动", textcolor=color.gray)
-    table.cell(infoTable, 1, 3, pushStatus, textcolor=pushColor)
-    table.cell(infoTable, 2, 3, str.tostring(pushCount) + "段", textcolor=pushColor)
+    table.cell(infoTable, 0, 3, "三段推动", text_color=color.gray)
+    table.cell(infoTable, 1, 3, pushStatus)
+    table.cell(infoTable, 2, 3, str.tostring(pushCount) + "段", bgcolor=pushColor)
     
-    failureStatus = failureSignal ? "检测到" : "无"
-    failureColor = failureSignal ? color.red : color.gray
-    table.cell(infoTable, 0, 4, "衰竭信号", textcolor=color.gray)
-    table.cell(infoTable, 1, 4, failureStatus, textcolor=failureColor)
-    table.cell(infoTable, 2, 4, failureSignal ? "警惕" : "安全", textcolor=failureColor)
+    // 衰竭信号
+    failureStatus = failureDetected ? "检测到" : "无"
+    failureColor = failureDetected ? color.red : color.gray
+    table.cell(infoTable, 0, 4, "衰竭信号", text_color=color.gray)
+    table.cell(infoTable, 1, 4, failureStatus)
+    table.cell(infoTable, 2, 4, failureDetected ? "警惕" : "安全", bgcolor=failureColor)
     
-    if not na(channelHeightValue)
-        table.cell(infoTable, 0, 5, "通道高度", textcolor=color.gray)
-        table.cell(infoTable, 1, 5, str.tostring(channelHeightValue, "#.##"), textcolor=color.white)
-        table.cell(infoTable, 2, 5, str.tostring(channelHeightValue / close * 100, "#.##") + "%", textcolor=color.white)
+    // 通道高度
+    if not na(channelHeightVal)
+        table.cell(infoTable, 0, 5, "通道高度", text_color=color.gray)
+        table.cell(infoTable, 1, 5, str.tostring(channelHeightVal, "#.##"))
+        table.cell(infoTable, 2, 5, str.tostring(channelHeightVal / close * 100, "#.##") + "%")
     
-    if not na(upperChannelLine) and not na(lowerChannelLine)
-        currentPos = (close - lowerPrice) / channelHeightValue * 100
+    // 当前位置
+    if not na(upperLine) and not na(lowerLine)
+        upperPrice = line.get_y2(upperLine)
+        lowerPrice = line.get_y1(lowerLine)
+        currentPos = (close - lowerPrice) / channelHeightVal * 100
         posColor = currentPos > 70 ? color.red : currentPos < 30 ? color.green : color.yellow
-        table.cell(infoTable, 0, 6, "当前位置", textcolor=color.gray)
-        table.cell(infoTable, 1, 6, str.tostring(currentPos, "#.#") + "%", textcolor=posColor)
+        table.cell(infoTable, 0, 6, "当前位置", text_color=color.gray)
+        table.cell(infoTable, 1, 6, str.tostring(currentPos, "#.#") + "%", bgcolor=posColor)
         posDesc = currentPos > 70 ? "上轨附近" : currentPos < 30 ? "下轨附近" : "通道中部"
-        table.cell(infoTable, 2, 6, posDesc, textcolor=posColor)
+        table.cell(infoTable, 2, 6, posDesc)
 
-if showAlerts
-    alertcondition(isRapidBullish() or isRapidBearish(), "急速行情", "检测到急速行情")
-    if not na(push1EndBar) and not na(push2EndBar) and not na(push3EndBar)
-        alertcondition(true, "三段推动完成", "三段推动形态完成")
-    alertcondition(failureSignal, "衰竭信号", "检测到通道衰竭信号")
+// 警报（在全局作用域）
+alertcondition(isRapidBullish or isRapidBearish, "急速行情", "检测到急速行情")
+if not na(push1End) and not na(push2End) and not na(push3End)
+    alertcondition(true, "三段推动完成", "三段推动形态完成")
+alertcondition(failureDetected, "衰竭信号", "检测到通道衰竭信号")
 
-plotshape(isRapidBullish(), "多头急速", shape.triangleup, location.belowbar, color.green, size=size.small)
-plotshape(isRapidBearish(), "空头急速", shape.triangledown, location.abovebar, color.red, size=size.small)
-if failureSignal
-    plotshape(failureBarIdx == bar_index, "衰竭点", shape.xcross, location.abovebar, color.red, size=size.normal)
+// 图形标记
+plotshape(isRapidBullish, "多头急速", shape.triangleup, location.belowbar, color.green, size=size.small)
+plotshape(isRapidBearish, "空头急速", shape.triangledown, location.abovebar, color.red, size=size.small)
+if failureDetected
+    plotshape(failureBar == bar_index, "衰竭点", shape.xcross, location.abovebar, color.red, size=size.normal)
 
 // 系统说明
 // 本指标实现"通道三段式推动"交易系统
