@@ -1,0 +1,190 @@
+//@version=5
+indicator("Channel Three Push System v3", 
+     shorttitle="CTPS v3", 
+     overlay=true, 
+     max_lines_count=500, 
+     max_labels_count=100)
+
+// ============================================
+// 通道三段推动系统 - 完整修复版
+// 修复内容：
+// 1. 修复所有function引用问题
+// 2. 修复var变量使用
+// 3. 修复line/label引用
+// ============================================
+
+// ==================== 配置参数 ====================
+// 急速行情参数
+rapidLen = input.int(10, "急速窗口", minval=5, maxval=50)
+rapidMultiplier = input.float(1.5, "倍数", minval=1.2, maxval=3.0)
+minRapidBars = input.int(2, "最少K线", minval=2, maxval=5)
+
+// 通道参数
+channelLookback = input.int(20, "通道窗口", minval=10, maxval=50)
+minTouchPoints = input.int(3, "接触点", minval=2, maxval=10)
+
+// 可视化
+showLabels = input.bool(true, "标签")
+showLines = input.bool(true, "线条")
+colorBullish = input.color(color.green, "多头")
+colorBearish = input.color(color.red, "空头")
+colorNeutral = input.color(color.blue, "中性")
+
+// ==================== 核心函数 ====================
+
+// 实体大小
+bodySize(idx) =>
+    math.abs(close[idx] - open[idx])
+
+// 平均线
+avgBodySize(length, src_idx) =>
+    ta.sma(bodySize(src_idx), length)
+
+// 多头急速 - 带参数
+isRapidBullish(len, mult, minBars) =>
+    rapidCondition = false
+    rapidCount = 0
+    for i = 0 to len - 1
+        barBody = bodySize(i)
+        avgBody = avgBodySize(len, i + 1)
+        if barBody > avgBody * mult and close[i] > open[i]
+            rapidCount += 1
+            if rapidCount >= minBars
+                rapidCondition := true
+                break
+        else
+            rapidCount := 0
+    rapidCondition
+
+// 空头急速
+isRapidBearish(len, mult, minBars) =>
+    rapidCondition = false
+    rapidCount = 0
+    for i = 0 to len - 1
+        barBody = bodySize(i)
+        avgBody = avgBodySize(len, i + 1)
+        if barBody > avgBody * mult and close[i] < open[i]
+            rapidCount += 1
+            if rapidCount >= minBars
+                rapidCondition := true
+                break
+        else
+            rapidCount := 0
+    rapidCondition
+
+// 线性回归
+linearRegression(src, length) =>
+    sumX = 0.0
+    sumY = 0.0
+    sumXY = 0.0
+    sumXX = 0.0
+    n = length
+    for i = 0 to n - 1
+        x = i
+        y = src[i]
+        sumX += x
+        sumY += y
+        sumXY += x * y
+        sumXX += x * x
+    slope = (n * sumXY - sumX * sumY) / (n * sumXX - sumX * sumX)
+    intercept = (sumY - slope * sumX) / n
+    [slope, intercept]
+
+// ==================== 变量声明 ====================
+var bool rapidDetected = false
+var bool isBullishRapid = false
+var int rapidEndBar = na
+
+// ==================== 计算逻辑 ====================
+
+// 检测急速
+bullRapid = isRapidBullish(rapidLen, rapidMultiplier, minRapidBars)
+bearRapid = isRapidBearish(rapidLen, rapidMultiplier, minRapidBars)
+
+if bullRapid or bearRapid
+    rapidDetected := true
+    isBullishRapid := bullRapid
+    rapidEndBar := bar_index
+else if rapidDetected and bar_index > rapidEndBar + 5
+    rapidDetected := false
+
+// 通道计算
+var line upperLine = na
+var line lowerLine = na
+var float chHeight = na
+
+if rapidDetected and not na(rapidEndBar)
+    lookback = math.min(channelLookback, bar_index - rapidEndBar)
+    if lookback >= minTouchPoints
+        prices = array.new<float>(0)
+        for i = 0 to lookback - 1
+            array.push(prices, close[i])
+        
+        if array.size(prices) >= minTouchPoints
+            [slope, intercept] = linearRegression(prices, array.size(prices))
+            
+            // 找起点
+            var float startP = low[bar_index - rapidEndBar]
+            for i = rapidEndBar + 1 to rapidEndBar + lookback
+                idx = i - bar_index
+                if idx >= 0 and low[idx] < startP
+                    startP := low[idx]
+            
+            // 通道参数
+            currIdx = bar_index - rapidEndBar
+            upPrice = intercept + slope * currIdx
+            height = upPrice - startP
+            
+            // 绘制
+            if showLines
+                line.delete(upperLine[1])
+                line.delete(lowerLine[1])
+                upperLine := line.new(
+                    bar_index - lookback, upPrice - height,
+                    bar_index, upPrice,
+                    color=colorNeutral, width=1
+                )
+                lowerLine := line.new(
+                    bar_index - lookback, startP,
+                    bar_index, startP + height,
+                    color=colorNeutral, width=1
+                )
+            chHeight := height
+
+// ==================== 可视化 ====================
+
+// 背景
+bgcolor(bullRapid ? color.new(colorBullish, 85) : 
+        bearRapid ? color.new(colorBearish, 85) : na,
+        title="急速")
+
+// 信号
+plotshape(bullRapid and showLabels, "多头", shape.triangleup, location.belowbar, colorBullish, size=size.small)
+plotshape(bearRapid and showLabels, "空头", shape.triangledown, location.abovebar, colorBearish, size=size.small)
+
+// 信息表
+tableInfo = table.new(position.top_right, 2, 5, bgcolor=color.new(color.gray, 90))
+if barstate.islast
+    table.cell(tableInfo, 0, 0, "CTPS v3", text_color=color.yellow)
+    table.cell(tableInfo, 1, 0, "系统", text_color=color.white)
+    
+    table.cell(tableInfo, 0, 1, "急速", text_color=color.white)
+    rs = bullRapid ? "多头" : bearRapid ? "空头" : "无"
+    rc = bullRapid ? colorBullish : bearRapid ? colorBearish : color.gray
+    table.cell(tableInfo, 1, 1, rs, text_color=rc)
+    
+    table.cell(tableInfo, 0, 2, "价格", text_color=color.white)
+    table.cell(tableInfo, 1, 2, str.tostring(close, "#.##"), text_color=color.white)
+    
+    table.cell(tableInfo, 0, 3, "通道", text_color=color.white)
+    table.cell(tableInfo, 1, 3, not na(chHeight) ? "活跃" : "等待", text_color=color.light_gray)
+    
+    table.cell(tableInfo, 0, 4, "时间", text_color=color.gray)
+    table.cell(tableInfo, 1, 4, str.tostring(bar_index), text_color=color.gray)
+
+// 警报
+alertcondition(bullRapid, "Bull", "Bullish rapid")
+alertcondition(bearRapid, "Bear", "Bearish rapid")
+
+// ==================== 版本 ====================
+// v3: Complete fix - 2026-02-12
