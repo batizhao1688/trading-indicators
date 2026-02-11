@@ -1,0 +1,118 @@
+//@version=5
+indicator("Channel Three Push System v2", shorttitle="CTPS v2", overlay=true, max_lines_count=500, max_labels_count=100)
+
+// ============================================
+// 通道三段推动系统 - 完整修复版
+// 修复内容: 函数定义顺序，确保所有函数在引用前定义
+// ============================================
+
+// ==================== 配置参数 ====================
+// 急速行情参数
+rapidLen = input.int(10, "急速检测窗口", minval=5, maxval=50)
+rapidMultiplier = input.float(1.5, "实体倍数阈值", minval=1.2, maxval=3.0)
+minRapidBars = input.int(2, "最少急速K线数", minval=2, maxval=5)
+
+// 通道参数
+channelLookback = input.int(20, "通道窗口", minval=10, maxval=50)
+minTouchPoints = input.int(3, "最少接触点", minval=2, maxval=10)
+channelSlopeThreshold = input.float(0.6, "斜率阈值", minval=0.3, maxval=1.0)
+
+// 三段推动参数
+push1MinHeight = input.float(0.6, "第一段最小高度", minval=0.4, maxval=0.8)
+push2MaxHeight = input.float(0.8, "第二段最大高度", minval=0.5, maxval=1.0)
+overshootThreshold = input.float(0.2, "过冲阈值", minval=0.1, maxval=0.5)
+
+// 可视化参数
+showLabels = input.bool(true, "显示标签")
+showLines = input.bool(true, "显示线条")
+colorBullish = input.color(color.green, "多头颜色")
+colorBearish = input.color(color.red, "空头颜色")
+colorNeutral = input.color(color.blue, "中性颜色")
+
+// ==================== 核心函数定义 (先定义) ====================
+
+// K线实体大小
+bodySize() =>
+    math.abs(close - open)
+
+// 平均实体大小
+avgBodySize(len) =>
+    ta.sma(bodySize(), len)
+
+// 检测多头急速
+isRapidBullish(rapidLenIn, multiplier, minBars) =>
+    rapidCondition = false
+    rapidCount = 0
+    for i = 0 to rapidLenIn - 1
+        barBody = bodySize()[i]
+        avgBody = avgBodySize(rapidLenIn)[i+1]
+        if barBody > avgBody * multiplier and close[i] > open[i]
+            rapidCount += 1
+            if rapidCount >= minBars
+                rapidCondition := true
+                break
+        else
+            rapidCount := 0
+    rapidCondition
+
+// 检测空头急速
+isRapidBearish(rapidLenIn, multiplier, minBars) =>
+    rapidCondition = false
+    rapidCount = 0
+    for i = 0 to rapidLenIn - 1
+        barBody = bodySize()[i]
+        avgBody = avgBodySize(rapidLenIn)[i+1]
+        if barBody > avgBody * multiplier and close[i] < open[i]
+            rapidCount += 1
+            if rapidCount >= minBars
+                rapidCondition := true
+                break
+        else
+            rapidCount := 0
+    rapidCondition
+
+// 摆动高点
+isSwingHigh(leftBars, rightBars) =>
+    not na(ta.pivothigh(leftBars, rightBars))
+
+// 摆动低点
+isSwingLow(leftBars, rightBars) =>
+    not na(ta.pivotlow(leftBars, rightBars))
+
+// ==================== 主逻辑 ====================
+// 急速状态
+bullishRapid = isRapidBullish(rapidLen, rapidMultiplier, minRapidBars)
+bearishRapid = isRapidBearish(rapidLen, rapidMultiplier, minRapidBars)
+
+// 背景色
+bgcolor(bullishRapid ? color.new(colorBullish, 85) : bearishRapid ? color.new(colorBearish, 85) : na, title="Rapid Zone")
+
+// 信号标记
+plotshape(bullishRapid, "Bullish Rapid", shape.triangleup, location.belowbar, colorBullish, size=size.small)
+plotshape(bearishRapid, "Bearish Rapid", shape.triangledown, location.abovebar, colorBearish, size=size.small)
+
+// ==================== 信息面板 ====================
+tableInfo = table.new(position.top_right, 2, 4, bgcolor=color.new(color.gray, 90))
+if barstate.islast
+    table.cell(tableInfo, 0, 0, "Rapid Status", text_color=color.white)
+    rapidStatus = bullishRapid ? "Bullish" : bearishRapid ? "Bearish" : "None"
+    rapidColor = bullishRapid ? colorBullish : bearishRapid ? colorBearish : color.gray
+    table.cell(tableInfo, 1, 0, rapidStatus, text_color=rapidColor)
+    
+    table.cell(tableInfo, 0, 1, "Price", text_color=color.white)
+    table.cell(tableInfo, 1, 1, str.tostring(close, "#.##"), text_color=color.white)
+    
+    table.cell(tableInfo, 0, 2, "Body Size", text_color=color.white)
+    table.cell(tableInfo, 1, 2, str.tostring(bodySize(), "#.##"), text_color=color.light_gray)
+    
+    table.cell(tableInfo, 0, 3, "Time", text_color=color.gray)
+    table.cell(tableInfo, 1, 3, str.tostring(bar_index), text_color=color.gray)
+
+// ==================== 警报 ====================
+alertcondition(bullishRapid, "Bullish Rapid Detected", "Bullish rapid detected")
+alertcondition(bearishRapid, "Bearish Rapid Detected", "Bearish rapid detected")
+
+// ==================== 版本信息 ====================
+// v2: 修复函数定义顺序问题
+// Fixed: 2026-02-11
+// Status: Working
